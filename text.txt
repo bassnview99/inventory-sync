@@ -1,0 +1,14 @@
+total 40
+drwxrwxrwx+ 6 codespace codespace 4096 Nov  1 14:06 .
+drwxr-xrwx+ 5 codespace root      4096 Oct 31 15:11 ..
+-rw-r--r--  1 codespace codespace  827 Nov  1 13:55 .env
+drwxrwxrwx+ 8 codespace root      4096 Oct 31 19:03 .git
+-rw-r--r--  1 codespace codespace  151 Oct 31 14:18 .gitignore
+-rw-r--r--  1 codespace codespace 4075 Oct 31 14:18 README.md
+drwxrwxrwx+ 6 codespace codespace 4096 Oct 31 15:15 backend
+-rw-r--r--  1 codespace codespace 1501 Oct 31 14:18 docker-compose.yml
+drwxrwxrwx+ 2 codespace codespace 4096 Oct 31 15:15 docs
+drwxrwxrwx+ 4 codespace codespace 4096 Oct 31 15:36 frontend
+-rw-rw-rw-  1 codespace root         0 Oct 31 15:11 inventory-sync-stage2.zip
+-rw-rw-rw-  1 codespace codespace    0 Nov  1 14:06 s
+-rw-rw-rw-  1 codespace codespace    0 Nov  1 14:06 text.txt
