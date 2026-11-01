@@ -1,0 +1,25 @@
+ .env.example                                      |   14 +
+ README.md                                         |   18 +
+ backend/alembic/versions/0002_external_catalog.py |   47 ++++
+ backend/app/api/__init__.py                       |    7 +
+ backend/app/api/catalog.py                        |   73 ++++++
+ backend/app/api/connections.py                    |   74 ++++++
+ backend/app/config.py                             |   19 ++
+ backend/app/database.py                           |   11 -
+ backend/app/database/__init__.py                  |   11 +
+ backend/app/integrations/tiendanube/__init__.py   |    3 
+ backend/app/integrations/tiendanube/client.py     |  138 +++++++++++
+ backend/app/integrations/tiendanube/normalize.py  |   65 +++++
+ backend/app/main.py                               |   12 +
+ backend/app/models.py                             |   34 +++
+ backend/app/security.py                           |   42 +++
+ backend/app/services/__init__.py                  |    0 
+ backend/app/services/catalog.py                   |   96 ++++++++
+ backend/app/services/connections.py               |  101 ++++++++
+ backend/tests/conftest.py                         |   73 ++++++
+ backend/tests/test_health.py                      |    2 
+ backend/tests/test_tiendanube_stage2.py           |  266 +++++++++++++++++++++
+ docs/roadmap.md                                   |   12 +
+ frontend/src/App.jsx                              |  248 +++++++++++++++++++-
+ frontend/src/style.css                            |   55 ++++
+ 24 files changed, 1378 insertions(+), 43 deletions(-)
