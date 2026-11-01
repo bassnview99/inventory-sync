@@ -1,0 +1,1651 @@
+diff --git a/.env.example b/.env.example
+index 7a0cc54..5cfb337 100644
+--- a/.env.example
++++ b/.env.example
+@@ -2,10 +2,24 @@ APP_ENV=development
+ APP_SECRET_KEY=replace-with-a-long-random-secret
+ TOKEN_ENCRYPTION_KEY=replace-with-a-separate-32-byte-key
+ 
++# Clave que escribes en el panel para acceder (hasta que exista login real en la etapa 7).
++# Genera una con: python -c "import secrets; print(secrets.token_urlsafe(32))"
++ADMIN_API_KEY=
++
+ DATABASE_URL=postgresql+asyncpg://inventory:inventory_dev_password@db:5432/inventory
+ REDIS_URL=redis://redis:6379/0
+ 
+ BACKEND_PORT=8000
+ FRONTEND_PORT=5173
+ CORS_ORIGINS=http://localhost:5173
++# URL del panel; el callback OAuth redirige aquí. En Codespaces usa la URL pública del puerto 5173.
++FRONTEND_URL=http://localhost:5173
+ LOG_LEVEL=INFO
++
++# --- Tiendanube (panel de socios: tiendanube.com/partners) ---
++# En tu app registra como URL de redirección:  <URL pública del backend>/api/connections/tiendanube/callback
++# Permiso necesario en esta etapa: read_products
++TIENDANUBE_APP_ID=
++TIENDANUBE_CLIENT_SECRET=
++# La API exige un User-Agent con el nombre de la app y un contacto real.
++TIENDANUBE_USER_AGENT=Inventory Sync (tu-email@ejemplo.com)
+diff --git a/README.md b/README.md
+index ee61dbe..e3bafd7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,8 +1,20 @@
+ # Inventory Sync — Tiendanube + Mercado Libre
+ 
+-Middleware propio para reconciliar inventario entre una tienda Tiendanube y una cuenta de Mercado Libre. Esta entrega implementa **Etapa 1: arquitectura, modelo de datos, migración inicial, configuración local, documentación y pruebas base**.
++Middleware propio para reconciliar inventario entre una tienda Tiendanube y una cuenta de Mercado Libre. Esta entrega implementa la **Etapa 2: conexión OAuth con Tiendanube e importación de su catálogo (solo lectura)**, sobre la base de la Etapa 1.
+ 
+-> No conecta todavía con las API externas ni modifica publicaciones. OAuth, webhooks e inventario real se implementarán en etapas posteriores, después de verificar los contratos oficiales vigentes.
++> Todavía **no sincroniza inventario**: no escribe nada en Tiendanube ni en Mercado Libre. Mercado Libre, la asociación por SKU, la comparación de stock y la sincronización llegan en las etapas 3 a 6.
++
++## Etapa 2: conectar Tiendanube
++
++1. En el panel de socios de Tiendanube crea una aplicación con el permiso `read_products` y como URL de redirección `<URL pública del backend>/api/connections/tiendanube/callback`.
++2. En `.env` completa `ADMIN_API_KEY`, `TIENDANUBE_APP_ID`, `TIENDANUBE_CLIENT_SECRET`, `TIENDANUBE_USER_AGENT` y `FRONTEND_URL` (ver `.env.example`).
++3. Aplica la migración nueva: `docker compose exec backend alembic upgrade head`.
++4. Abre el panel, introduce la `ADMIN_API_KEY`, pulsa **Conectar** y autoriza la app en Tiendanube.
++5. Pulsa **Importar catálogo**. El panel muestra variantes, SKU, stock, y el historial de importaciones con sus errores.
++
++El token de Tiendanube se guarda cifrado (Fernet, derivado de `TOKEN_ENCRYPTION_KEY`) y nunca se devuelve por la API.
++
++**Pendiente de comprobar con una tienda real:** el nombre exacto de la cabecera del token (`Authentication: bearer …`, constante `AUTH_HEADER` en `integrations/tiendanube/client.py`) no aparece en las páginas de documentación consultadas.
+ 
+ ## Stack
+ 
+@@ -111,7 +123,7 @@ inventory-sync/
+ | Etapa | Estado |
+ |---|---|
+ | 1. Arquitectura, base de datos y documentación | Implementación inicial entregada |
+-| 2. Tiendanube OAuth/API | Pendiente de verificación documental |
++| 2. Tiendanube OAuth/API | Implementada; falta probar con tienda real |
+ | 3. Mercado Libre OAuth/API | Pendiente de verificación documental |
+ | 4. Importación y asociación por SKU | Pendiente |
+ | 5. Sincronización y movimientos | Pendiente |
+diff --git a/backend/alembic/versions/0002_external_catalog.py b/backend/alembic/versions/0002_external_catalog.py
+new file mode 100644
+index 0000000..2a976e4
+--- /dev/null
++++ b/backend/alembic/versions/0002_external_catalog.py
+@@ -0,0 +1,47 @@
++"""Catálogo externo (solo lectura) y estados OAuth.
++
++Revision ID: 0002_external_catalog
++Revises: 0001_initial
++"""
++from alembic import op
++import sqlalchemy as sa
++
++revision = "0002_external_catalog"
++down_revision = "0001_initial"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    op.create_table(
++        "oauth_states",
++        sa.Column("state", sa.String(128), primary_key=True),
++        sa.Column("store_id", sa.Uuid(), sa.ForeignKey("stores.id", ondelete="CASCADE"), nullable=False),
++        sa.Column("platform", sa.String(30), nullable=False),
++        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
++    )
++    op.create_table(
++        "external_variants",
++        sa.Column("id", sa.Uuid(), primary_key=True),
++        sa.Column("store_id", sa.Uuid(), sa.ForeignKey("stores.id", ondelete="CASCADE"), nullable=False),
++        sa.Column("platform", sa.String(30), nullable=False),
++        sa.Column("external_product_id", sa.String(160), nullable=False),
++        sa.Column("external_variant_id", sa.String(160), nullable=False),
++        sa.Column("product_name", sa.String(300), nullable=False),
++        sa.Column("variant_name", sa.String(240)),
++        sa.Column("sku", sa.String(160)),
++        sa.Column("stock", sa.Integer()),
++        sa.Column("inventory_levels", sa.JSON()),
++        sa.Column("published", sa.Boolean(), nullable=False),
++        sa.Column("active", sa.Boolean(), nullable=False),
++        sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False),
++        sa.UniqueConstraint("store_id", "platform", "external_variant_id", name="uq_external_variant"),
++    )
++    op.create_index("ix_external_variants_sku", "external_variants", ["store_id", "platform", "sku"])
++
++
++def downgrade():
++    op.drop_index("ix_external_variants_sku", table_name="external_variants")
++    op.drop_table("external_variants")
++    op.drop_table("oauth_states")
+diff --git a/backend/app/api/__init__.py b/backend/app/api/__init__.py
+index e69de29..2f794bd 100644
+--- a/backend/app/api/__init__.py
++++ b/backend/app/api/__init__.py
+@@ -0,0 +1,7 @@
++from fastapi import APIRouter
++
++from app.api import catalog, connections
++
++api_router = APIRouter()
++api_router.include_router(connections.router)
++api_router.include_router(catalog.router)
+diff --git a/backend/app/api/catalog.py b/backend/app/api/catalog.py
+new file mode 100644
+index 0000000..1d57951
+--- /dev/null
++++ b/backend/app/api/catalog.py
+@@ -0,0 +1,73 @@
++from fastapi import APIRouter, Depends, Query
++from sqlalchemy import func, or_, select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.api.connections import get_transport
++from app.database import get_db
++from app.models import ExternalVariant, Platform, SyncJob, SyncLog
++from app.security import require_admin
++from app.services import catalog, connections
++
++router = APIRouter(prefix="/api", tags=["catalog"], dependencies=[Depends(require_admin)])
++
++
++def _job_view(job: SyncJob, logs: list[SyncLog] | None = None) -> dict:
++    return {
++        "id": str(job.id), "job_type": job.job_type, "status": job.status,
++        "source_platform": job.source_platform, "error_message": job.error_message,
++        "created_at": job.created_at, "completed_at": job.completed_at,
++        "logs": [{"level": l.level, "message": l.message, "details": l.details, "created_at": l.created_at}
++                 for l in (logs or [])],
++    }
++
++
++@router.post("/catalog/tiendanube/import")
++async def import_tiendanube(db: AsyncSession = Depends(get_db), transport=Depends(get_transport)):
++    """Lee el catálogo completo de Tiendanube y lo guarda localmente. No modifica nada en Tiendanube."""
++    store = await connections.get_or_create_store(db)
++    job = await catalog.import_tiendanube_catalog(db, store.id, transport=transport)
++    logs = (await db.execute(select(SyncLog).where(SyncLog.job_id == job.id).order_by(SyncLog.created_at))).scalars().all()
++    return _job_view(job, list(logs))
++
++
++@router.get("/catalog/variants")
++async def list_variants(platform: str = Query(Platform.TIENDANUBE.value), q: str | None = None,
++                        only_without_sku: bool = False, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
++                        db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    cond = [ExternalVariant.store_id == store.id, ExternalVariant.platform == platform, ExternalVariant.active.is_(True)]
++    if q:
++        like = f"%{q.strip()}%"
++        cond.append(or_(ExternalVariant.sku.ilike(like), ExternalVariant.product_name.ilike(like),
++                        ExternalVariant.variant_name.ilike(like)))
++    if only_without_sku:
++        cond.append(ExternalVariant.sku.is_(None))
++    total = (await db.execute(select(func.count()).select_from(ExternalVariant).where(*cond))).scalar_one()
++    rows = (await db.execute(
++        select(ExternalVariant).where(*cond).order_by(ExternalVariant.product_name, ExternalVariant.variant_name)
++        .limit(limit).offset(offset)
++    )).scalars().all()
++    return {
++        "total": total,
++        "items": [{
++            "id": str(r.id), "platform": r.platform, "product_id": r.external_product_id,
++            "variant_id": r.external_variant_id, "product_name": r.product_name, "variant_name": r.variant_name,
++            "sku": r.sku, "stock": r.stock, "inventory_levels": r.inventory_levels,
++            "published": r.published, "synced_at": r.synced_at,
++        } for r in rows],
++    }
++
++
++@router.get("/catalog/tiendanube/stats")
++async def tiendanube_stats(db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    return await catalog.tiendanube_stats(db, store.id)
++
++
++@router.get("/sync/jobs")
++async def list_jobs(limit: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    jobs = (await db.execute(
++        select(SyncJob).where(SyncJob.store_id == store.id).order_by(SyncJob.created_at.desc()).limit(limit)
++    )).scalars().all()
++    return {"items": [_job_view(j) for j in jobs]}
+diff --git a/backend/app/api/connections.py b/backend/app/api/connections.py
+new file mode 100644
+index 0000000..c666857
+--- /dev/null
++++ b/backend/app/api/connections.py
+@@ -0,0 +1,74 @@
++from urllib.parse import urlencode
++
++from fastapi import APIRouter, Depends, HTTPException, Query
++from fastapi.responses import RedirectResponse
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.config import settings
++from app.database import get_db
++from app.integrations.tiendanube import TiendanubeError, build_authorize_url, exchange_code
++from app.models import Platform
++from app.security import require_admin
++from app.services import connections
++
++router = APIRouter(prefix="/api/connections", tags=["connections"])
++
++# Se sobrescribe en pruebas para simular la API de Tiendanube.
++def get_transport():
++    return None
++
++
++@router.get("", dependencies=[Depends(require_admin)])
++async def list_connections(db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    return {
++        "store": {"id": str(store.id), "name": store.name},
++        "connections": [
++            connections.public_view(p, await connections.get_connection(db, store.id, p))
++            for p in connections.ALL_PLATFORMS
++        ],
++    }
++
++
++@router.post("/tiendanube/authorize", dependencies=[Depends(require_admin)])
++async def tiendanube_authorize(db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    state = await connections.create_oauth_state(db, store.id, Platform.TIENDANUBE.value)
++    try:
++        return {"authorize_url": build_authorize_url(state)}
++    except TiendanubeError as exc:
++        raise HTTPException(503, str(exc)) from exc
++
++
++@router.get("/tiendanube/callback", include_in_schema=False)
++async def tiendanube_callback(code: str | None = Query(None), state: str | None = Query(None),
++                              db: AsyncSession = Depends(get_db), transport=Depends(get_transport)):
++    """Destino de la redirección de Tiendanube. Lo abre el navegador, por eso no exige la clave de admin:
++    se protege con el `state` de un solo uso generado en /authorize."""
++    def back(result: str) -> RedirectResponse:
++        return RedirectResponse(f"{settings.frontend_url}/?{urlencode({'tiendanube': result})}", status_code=303)
++
++    if not code or not state:
++        return back("error_missing_params")
++    store_id = await connections.consume_oauth_state(db, state, Platform.TIENDANUBE.value)
++    if store_id is None:
++        return back("error_invalid_state")
++    try:
++        token = await exchange_code(code, transport=transport)
++    except TiendanubeError:
++        return back("error_token_exchange")
++    await connections.save_credentials(
++        db, store_id, Platform.TIENDANUBE.value,
++        account_id=str(token["user_id"]),
++        credentials={"access_token": token["access_token"], "user_id": str(token["user_id"]),
++                     "token_type": token.get("token_type", "bearer")},
++        scopes=token.get("scope"),
++    )
++    return back("connected")
++
++
++@router.delete("/tiendanube", dependencies=[Depends(require_admin)])
++async def tiendanube_disconnect(db: AsyncSession = Depends(get_db)):
++    store = await connections.get_or_create_store(db)
++    await connections.disconnect(db, store.id, Platform.TIENDANUBE.value)
++    return {"status": "disconnected"}
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 57438d1..fd18439 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -1,22 +1,41 @@
+ from functools import lru_cache
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ 
++DEV_PLACEHOLDERS = {"development-only-change-me", "replace-with-a-long-random-secret", "replace-with-a-separate-32-byte-key"}
++
+ 
+ class Settings(BaseSettings):
+     app_env: str = "development"
+     app_secret_key: str = "development-only-change-me"
+     token_encryption_key: str = "development-only-change-me"
++    # Clave que el panel envía en la cabecera X-Admin-Key. Vacía = API administrativa deshabilitada.
++    admin_api_key: str = ""
+     database_url: str = "sqlite+aiosqlite:///./inventory.db"
+     redis_url: str = "redis://localhost:6379/0"
+     cors_origins: str = "http://localhost:5173"
+     log_level: str = "INFO"
+ 
++    # URL pública del panel; el callback OAuth redirige aquí al terminar.
++    frontend_url: str = "http://localhost:5173"
++
++    # Tiendanube (https://tiendanube.github.io/api-documentation/authentication)
++    tiendanube_app_id: str = ""
++    tiendanube_client_secret: str = ""
++    tiendanube_auth_base: str = "https://www.tiendanube.com"
++    tiendanube_api_base: str = "https://api.tiendanube.com/v1"
++    # La API exige un User-Agent que identifique la app y un contacto; sin él responde 400.
++    tiendanube_user_agent: str = "Inventory Sync (contacto@example.com)"
++
+     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+ 
+     @property
+     def cors_origin_list(self) -> list[str]:
+         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+ 
++    @property
++    def is_production(self) -> bool:
++        return self.app_env.lower() == "production"
++
+ 
+ @lru_cache
+ def get_settings() -> Settings:
+diff --git a/backend/app/database.py b/backend/app/database.py
+deleted file mode 100644
+index 317a616..0000000
+--- a/backend/app/database.py
++++ /dev/null
+@@ -1,11 +0,0 @@
+-from collections.abc import AsyncGenerator
+-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+-from app.config import settings
+-
+-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+-
+-
+-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+-    async with AsyncSessionLocal() as session:
+-        yield session
+diff --git a/backend/app/database/__init__.py b/backend/app/database/__init__.py
+index e69de29..317a616 100644
+--- a/backend/app/database/__init__.py
++++ b/backend/app/database/__init__.py
+@@ -0,0 +1,11 @@
++from collections.abc import AsyncGenerator
++from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
++from app.config import settings
++
++engine = create_async_engine(settings.database_url, pool_pre_ping=True)
++AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
++
++
++async def get_db() -> AsyncGenerator[AsyncSession, None]:
++    async with AsyncSessionLocal() as session:
++        yield session
+diff --git a/backend/app/integrations/tiendanube/__init__.py b/backend/app/integrations/tiendanube/__init__.py
+new file mode 100644
+index 0000000..077e40f
+--- /dev/null
++++ b/backend/app/integrations/tiendanube/__init__.py
+@@ -0,0 +1,3 @@
++from app.integrations.tiendanube.client import (  # noqa: F401
++    TiendanubeClient, TiendanubeError, build_authorize_url, exchange_code,
++)
+diff --git a/backend/app/integrations/tiendanube/client.py b/backend/app/integrations/tiendanube/client.py
+new file mode 100644
+index 0000000..1cd6564
+--- /dev/null
++++ b/backend/app/integrations/tiendanube/client.py
+@@ -0,0 +1,138 @@
++"""Cliente HTTP de Tiendanube (solo lectura en esta etapa).
++
++Referencias oficiales:
++- OAuth: https://tiendanube.github.io/api-documentation/authentication
++- Límites: bucket de 40 solicitudes que se vacía a 2/s; 429 al excederlo. Cabeceras X-Rate-Limit-*.
++- Paginación: page (base 1), per_page hasta 200, cabecera Link con la URL de la página siguiente.
++- Toda solicitud debe llevar User-Agent con nombre de la app y contacto (si no, 400).
++"""
++import asyncio
++import random
++from collections.abc import AsyncIterator
++from urllib.parse import urlencode
++
++import httpx
++
++from app.config import settings
++
++# NOTA: el formato exacto de esta cabecera no figura en las páginas de documentación consultadas;
++# Tiendanube documenta `Authentication: bearer <token>`. Verifícalo con la primera conexión real.
++AUTH_HEADER = "Authentication"
++MAX_RETRIES = 5
++PAGE_SIZE = 200
++
++
++class TiendanubeError(Exception):
++    def __init__(self, message: str, status_code: int | None = None, retryable: bool = False):
++        super().__init__(message)
++        self.status_code = status_code
++        self.retryable = retryable
++
++
++def build_authorize_url(state: str) -> str:
++    if not settings.tiendanube_app_id:
++        raise TiendanubeError("TIENDANUBE_APP_ID no está configurado.")
++    base = f"{settings.tiendanube_auth_base}/apps/{settings.tiendanube_app_id}/authorize"
++    return f"{base}?{urlencode({'state': state})}"
++
++
++async def exchange_code(code: str, transport: httpx.AsyncBaseTransport | None = None) -> dict:
++    """Canjea el código de autorización (válido pocos minutos) por el token de acceso."""
++    if not settings.tiendanube_app_id or not settings.tiendanube_client_secret:
++        raise TiendanubeError("Faltan TIENDANUBE_APP_ID o TIENDANUBE_CLIENT_SECRET.")
++    async with httpx.AsyncClient(timeout=20, transport=transport) as http:
++        response = await http.post(
++            f"{settings.tiendanube_auth_base}/apps/authorize/token",
++            json={
++                "client_id": settings.tiendanube_app_id,
++                "client_secret": settings.tiendanube_client_secret,
++                "grant_type": "authorization_code",
++                "code": code,
++            },
++            headers={"User-Agent": settings.tiendanube_user_agent},
++        )
++    if response.status_code != 200:
++        raise TiendanubeError(f"Tiendanube rechazó el código de autorización (HTTP {response.status_code}).", response.status_code)
++    data = response.json()
++    if not data.get("access_token") or data.get("user_id") is None:
++        raise TiendanubeError("Respuesta de token incompleta.")
++    return data
++
++
++class TiendanubeClient:
++    def __init__(self, store_id: str, access_token: str, transport: httpx.AsyncBaseTransport | None = None,
++                 sleep=asyncio.sleep):
++        self.store_id = str(store_id)
++        self._sleep = sleep
++        self._http = httpx.AsyncClient(
++            base_url=f"{settings.tiendanube_api_base}/{self.store_id}",
++            headers={
++                AUTH_HEADER: f"bearer {access_token}",
++                "User-Agent": settings.tiendanube_user_agent,
++                "Content-Type": "application/json",
++            },
++            timeout=30,
++            transport=transport,
++        )
++
++    async def __aenter__(self) -> "TiendanubeClient":
++        return self
++
++    async def __aexit__(self, *exc) -> None:
++        await self._http.aclose()
++
++    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
++        for attempt in range(MAX_RETRIES + 1):
++            try:
++                response = await self._http.request(method, url, **kwargs)
++            except (httpx.TimeoutException, httpx.TransportError) as exc:
++                if attempt == MAX_RETRIES:
++                    raise TiendanubeError(f"Error de red hablando con Tiendanube: {exc}", retryable=True) from exc
++                await self._sleep(self._backoff(attempt))
++                continue
++
++            if response.status_code == 429 or response.status_code >= 500:
++                if attempt == MAX_RETRIES:
++                    raise TiendanubeError(
++                        f"Tiendanube respondió HTTP {response.status_code} tras {MAX_RETRIES} reintentos.",
++                        response.status_code, retryable=True,
++                    )
++                await self._sleep(self._retry_delay(response, attempt))
++                continue
++            return response
++        raise AssertionError("unreachable")
++
++    @staticmethod
++    def _backoff(attempt: int) -> float:
++        return min(30.0, 2 ** attempt) + random.uniform(0, 0.5)
++
++    @classmethod
++    def _retry_delay(cls, response: httpx.Response, attempt: int) -> float:
++        retry_after = response.headers.get("Retry-After")
++        if retry_after and retry_after.replace(".", "", 1).isdigit():
++            return float(retry_after)
++        reset_ms = response.headers.get("X-Rate-Limit-Reset")  # milisegundos hasta vaciar el bucket
++        if response.status_code == 429 and reset_ms and reset_ms.isdigit():
++            return int(reset_ms) / 1000 + 0.2
++        return cls._backoff(attempt)
++
++    async def iter_products(self) -> AsyncIterator[dict]:
++        """Recorre todo el catálogo siguiendo la cabecera Link (no se construyen URLs a mano)."""
++        url: str | None = "/products"
++        params: dict | None = {"per_page": PAGE_SIZE}
++        first = True
++        while url:
++            response = await self._request("GET", url, params=params)
++            if response.status_code == 404 and first:
++                return  # Tiendanube responde 404 cuando la tienda no tiene productos.
++            if response.status_code in (401, 403):
++                raise TiendanubeError("Tiendanube rechazó el token (¿falta el permiso read_products o se desinstaló la app?).",
++                                      response.status_code)
++            if response.status_code != 200:
++                raise TiendanubeError(f"Error al leer productos (HTTP {response.status_code}).", response.status_code)
++            first = False
++            for product in response.json():
++                yield product
++            next_link = response.links.get("next")
++            url = next_link["url"] if next_link else None
++            params = None  # la URL de `next` ya trae sus parámetros
+diff --git a/backend/app/integrations/tiendanube/normalize.py b/backend/app/integrations/tiendanube/normalize.py
+new file mode 100644
+index 0000000..a9d06a7
+--- /dev/null
++++ b/backend/app/integrations/tiendanube/normalize.py
+@@ -0,0 +1,65 @@
++"""Convierte productos de Tiendanube en filas planas de variantes. Sin E/S: fácil de probar."""
++from dataclasses import dataclass
++
++LANG_PREFERENCE = ("es", "pt", "en")
++
++
++def localized(value) -> str:
++    """Tiendanube devuelve textos como {"es": "Remera", "pt": "Camiseta"}."""
++    if isinstance(value, dict):
++        for lang in LANG_PREFERENCE:
++            if value.get(lang):
++                return str(value[lang]).strip()
++        for text in value.values():
++            if text:
++                return str(text).strip()
++        return ""
++    return str(value).strip() if value else ""
++
++
++@dataclass(frozen=True)
++class NormalizedVariant:
++    external_product_id: str
++    external_variant_id: str
++    product_name: str
++    variant_name: str | None
++    sku: str | None
++    stock: int | None
++    inventory_levels: list[dict] | None
++    published: bool
++
++
++def _variant_name(variant: dict) -> str | None:
++    values = [localized(v) for v in (variant.get("values") or [])]
++    values = [v for v in values if v]
++    return " / ".join(values) if values else None
++
++
++def _stock(variant: dict) -> tuple[int | None, list[dict] | None]:
++    levels = variant.get("inventory_levels")
++    if levels:
++        clean = [{"location_id": str(lv.get("location_id")), "stock": lv.get("stock")} for lv in levels]
++        known = [lv["stock"] for lv in clean if isinstance(lv["stock"], int)]
++        # Con multi-inventario `stock` del nivel puede ser null (sin control): total solo si hay algún dato.
++        return (sum(known) if known else None), clean
++    stock = variant.get("stock")
++    return (stock if isinstance(stock, int) else None), None
++
++
++def normalize_product(product: dict) -> list[NormalizedVariant]:
++    name = localized(product.get("name")) or f"Producto {product.get('id')}"
++    rows = []
++    for variant in product.get("variants") or []:
++        sku = (variant.get("sku") or "").strip() or None  # se conserva el valor original; solo se descartan vacíos
++        stock, levels = _stock(variant)
++        rows.append(NormalizedVariant(
++            external_product_id=str(product["id"]),
++            external_variant_id=str(variant["id"]),
++            product_name=name[:300],
++            variant_name=(_variant_name(variant) or None),
++            sku=sku[:160] if sku else None,
++            stock=stock,
++            inventory_levels=levels,
++            published=bool(product.get("published", True)),
++        ))
++    return rows
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 5aa3c41..14405dc 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -1,11 +1,13 @@
+ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
++
++from app.api import api_router
+ from app.config import settings
+ 
+ app = FastAPI(
+     title="Inventory Sync API",
+-    version="0.1.0",
+-    description="Middleware de inventario Tiendanube + Mercado Libre. Etapa 1: arquitectura.",
++    version="0.2.0",
++    description="Middleware de inventario Tiendanube + Mercado Libre. Etapa 2: conexión y catálogo de Tiendanube (solo lectura).",
+ )
+ 
+ app.add_middleware(
+@@ -13,13 +15,15 @@ app.add_middleware(
+     allow_origins=settings.cors_origin_list,
+     allow_credentials=True,
+     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
++    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Admin-Key"],
+ )
+ 
++app.include_router(api_router)
++
+ 
+ @app.get("/health", tags=["health"])
+ async def health():
+-    return {"status": "ok", "service": "inventory-sync-api", "stage": 1}
++    return {"status": "ok", "service": "inventory-sync-api", "stage": 2}
+ 
+ 
+ @app.get("/", include_in_schema=False)
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 7dadad7..4338cab 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -198,3 +198,37 @@ class AuditLog(Base):
+     entity_id: Mapped[str | None] = mapped_column(String(160))
+     details: Mapped[dict | None] = mapped_column(JSON)
+     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
++
++
++class OAuthState(Base):
++    """Valor `state` de un flujo OAuth en curso. De un solo uso y con caducidad (protección CSRF)."""
++    __tablename__ = "oauth_states"
++    state: Mapped[str] = mapped_column(String(128), primary_key=True)
++    store_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
++    platform: Mapped[str] = mapped_column(String(30), nullable=False)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
++    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
++
++
++class ExternalVariant(Base):
++    """Instantánea de solo lectura de una variante tal como existe en una plataforma externa."""
++    __tablename__ = "external_variants"
++    __table_args__ = (
++        UniqueConstraint("store_id", "platform", "external_variant_id", name="uq_external_variant"),
++        Index("ix_external_variants_sku", "store_id", "platform", "sku"),
++    )
++    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
++    store_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
++    platform: Mapped[str] = mapped_column(String(30), nullable=False)
++    external_product_id: Mapped[str] = mapped_column(String(160), nullable=False)
++    external_variant_id: Mapped[str] = mapped_column(String(160), nullable=False)
++    product_name: Mapped[str] = mapped_column(String(300), nullable=False)
++    variant_name: Mapped[str | None] = mapped_column(String(240))
++    sku: Mapped[str | None] = mapped_column(String(160))
++    # None = la plataforma no controla stock para esta variante (stock ilimitado).
++    stock: Mapped[int | None] = mapped_column(Integer)
++    inventory_levels: Mapped[list | None] = mapped_column(JSON)
++    published: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
++    # False cuando la variante dejó de aparecer en una importación completa.
++    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
++    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+diff --git a/backend/app/security.py b/backend/app/security.py
+new file mode 100644
+index 0000000..3e59183
+--- /dev/null
++++ b/backend/app/security.py
+@@ -0,0 +1,42 @@
++import base64
++import hashlib
++import json
++import secrets
++
++from cryptography.fernet import Fernet, InvalidToken
++from fastapi import Header, HTTPException, status
++
++from app.config import DEV_PLACEHOLDERS, settings
++
++
++def _fernet() -> Fernet:
++    key = settings.token_encryption_key
++    if settings.is_production and (key in DEV_PLACEHOLDERS or len(key) < 32):
++        raise RuntimeError("TOKEN_ENCRYPTION_KEY debe ser un secreto propio de al menos 32 caracteres en producción.")
++    # Se deriva una clave Fernet válida de 32 bytes a partir del secreto configurado.
++    digest = hashlib.sha256(key.encode("utf-8")).digest()
++    return Fernet(base64.urlsafe_b64encode(digest))
++
++
++def encrypt_credentials(data: dict) -> str:
++    return _fernet().encrypt(json.dumps(data).encode("utf-8")).decode("ascii")
++
++
++def decrypt_credentials(token: str) -> dict:
++    try:
++        return json.loads(_fernet().decrypt(token.encode("ascii")))
++    except InvalidToken as exc:
++        raise ValueError("No se pudieron descifrar las credenciales (¿cambió TOKEN_ENCRYPTION_KEY?).") from exc
++
++
++def new_state() -> str:
++    return secrets.token_urlsafe(32)
++
++
++async def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
++    """Protege la API administrativa hasta que exista login real (etapa 7)."""
++    expected = settings.admin_api_key
++    if not expected:
++        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "ADMIN_API_KEY no está configurada en el servidor.")
++    if not x_admin_key or not secrets.compare_digest(x_admin_key, expected):
++        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Clave de administración inválida.")
+diff --git a/inventory-sync-stage2.zip b/backend/app/services/__init__.py
+similarity index 100%
+rename from inventory-sync-stage2.zip
+rename to backend/app/services/__init__.py
+diff --git a/backend/app/services/catalog.py b/backend/app/services/catalog.py
+new file mode 100644
+index 0000000..c4a7770
+--- /dev/null
++++ b/backend/app/services/catalog.py
+@@ -0,0 +1,96 @@
++"""Importación de catálogo de solo lectura: nunca escribe en la plataforma externa."""
++import uuid
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.integrations.tiendanube import TiendanubeClient, TiendanubeError
++from app.integrations.tiendanube.normalize import NormalizedVariant, normalize_product
++from app.models import ExternalVariant, Platform, SyncJob, SyncLog, utcnow
++from app.services import connections
++
++
++async def _upsert(db: AsyncSession, store_id: uuid.UUID, platform: str, rows: list[NormalizedVariant]) -> dict:
++    existing = {
++        v.external_variant_id: v
++        for v in (await db.execute(
++            select(ExternalVariant).where(ExternalVariant.store_id == store_id, ExternalVariant.platform == platform)
++        )).scalars()
++    }
++    now = utcnow()
++    created = updated = 0
++    for row in rows:
++        current = existing.get(row.external_variant_id)
++        if current is None:
++            db.add(ExternalVariant(store_id=store_id, platform=platform, synced_at=now, **row.__dict__))
++            created += 1
++            continue
++        for field, value in row.__dict__.items():
++            setattr(current, field, value)
++        current.active = True
++        current.synced_at = now
++        updated += 1
++    seen = {r.external_variant_id for r in rows}
++    gone = [v for k, v in existing.items() if k not in seen and v.active]
++    for v in gone:
++        v.active = False  # solo tras una lectura completa y exitosa
++    return {"created": created, "updated": updated, "deactivated": len(gone), "total": len(rows)}
++
++
++async def import_tiendanube_catalog(db: AsyncSession, store_id: uuid.UUID, *, transport=None, sleep=None) -> SyncJob:
++    job = SyncJob(store_id=store_id, source_platform=Platform.TIENDANUBE.value, job_type="catalog_import",
++                  status="running", attempts=1, idempotency_key=f"catalog_import:{uuid.uuid4()}")
++    db.add(job)
++    await db.commit()
++    job_id = job.id  # se guarda: tras un rollback el objeto expira
++
++    async def log(level: str, message: str, details: dict | None = None):
++        db.add(SyncLog(job_id=job_id, level=level, message=message, details=details))
++
++    conn = await connections.get_connection(db, store_id, Platform.TIENDANUBE.value)
++    try:
++        creds = connections.read_credentials(conn)
++        if creds is None:
++            raise TiendanubeError("Tiendanube no está conectada.")
++        kwargs = {"transport": transport}
++        if sleep:
++            kwargs["sleep"] = sleep
++        rows: list[NormalizedVariant] = []
++        async with TiendanubeClient(creds["user_id"], creds["access_token"], **kwargs) as client:
++            async for product in client.iter_products():
++                rows.extend(normalize_product(product))
++        summary = await _upsert(db, store_id, Platform.TIENDANUBE.value, rows)
++        job.status = "completed"
++        await log("info", "Catálogo de Tiendanube importado.", summary)
++    except TiendanubeError as exc:
++        await db.rollback()
++        job = await db.get(SyncJob, job_id)
++        job.status = "failed"
++        job.error_message = str(exc)
++        if exc.status_code in (401, 403) and conn is not None:
++            conn = await connections.get_connection(db, store_id, Platform.TIENDANUBE.value)
++            conn.status = "error"
++        await log("error", str(exc), {"status_code": exc.status_code, "retryable": exc.retryable})
++    except ValueError as exc:  # credenciales no descifrables
++        await db.rollback()
++        job = await db.get(SyncJob, job_id)
++        job.status = "failed"
++        job.error_message = str(exc)
++        await log("error", str(exc))
++    job.completed_at = utcnow()
++    await db.commit()
++    return job
++
++
++async def tiendanube_stats(db: AsyncSession, store_id: uuid.UUID) -> dict:
++    rows = (await db.execute(
++        select(ExternalVariant).where(ExternalVariant.store_id == store_id,
++                                      ExternalVariant.platform == Platform.TIENDANUBE.value,
++                                      ExternalVariant.active.is_(True))
++    )).scalars().all()
++    return {
++        "variants": len(rows),
++        "without_sku": sum(1 for r in rows if not r.sku),
++        "unmanaged_stock": sum(1 for r in rows if r.stock is None),
++        "last_synced_at": max((r.synced_at for r in rows), default=None),
++    }
+diff --git a/backend/app/services/connections.py b/backend/app/services/connections.py
+new file mode 100644
+index 0000000..c39377b
+--- /dev/null
++++ b/backend/app/services/connections.py
+@@ -0,0 +1,101 @@
++import uuid
++from datetime import datetime, timedelta, timezone
++
++from sqlalchemy import delete, select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.models import AuditLog, OAuthState, Platform, PlatformConnection, Store, utcnow
++from app.security import decrypt_credentials, encrypt_credentials, new_state
++
++STATE_TTL = timedelta(minutes=10)
++
++
++async def get_or_create_store(db: AsyncSession) -> Store:
++    """Despliegue de una sola tienda: se crea una tienda por defecto en el primer uso."""
++    store = (await db.execute(select(Store).order_by(Store.created_at).limit(1))).scalar_one_or_none()
++    if store is None:
++        store = Store(name="Mi tienda")
++        db.add(store)
++        await db.commit()
++    return store
++
++
++async def get_connection(db: AsyncSession, store_id: uuid.UUID, platform: str) -> PlatformConnection | None:
++    return (await db.execute(
++        select(PlatformConnection).where(PlatformConnection.store_id == store_id, PlatformConnection.platform == platform)
++    )).scalar_one_or_none()
++
++
++async def create_oauth_state(db: AsyncSession, store_id: uuid.UUID, platform: str) -> str:
++    now = utcnow()
++    await db.execute(delete(OAuthState).where(OAuthState.expires_at < now))  # limpieza oportunista
++    state = new_state()
++    db.add(OAuthState(state=state, store_id=store_id, platform=platform, expires_at=now + STATE_TTL))
++    await db.commit()
++    return state
++
++
++async def consume_oauth_state(db: AsyncSession, state: str, platform: str) -> uuid.UUID | None:
++    """Devuelve el store_id si el state existe, es de la plataforma y no caducó. Siempre lo invalida."""
++    row = await db.get(OAuthState, state)
++    if row is None:
++        return None
++    await db.delete(row)
++    await db.commit()
++    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
++    if row.platform != platform or expires < utcnow():
++        return None
++    return row.store_id
++
++
++async def save_credentials(db: AsyncSession, store_id: uuid.UUID, platform: str, *, account_id: str,
++                           credentials: dict, scopes: str | None) -> PlatformConnection:
++    conn = await get_connection(db, store_id, platform)
++    if conn is None:
++        conn = PlatformConnection(store_id=store_id, platform=platform)
++        db.add(conn)
++    conn.external_account_id = account_id
++    conn.credentials_encrypted = encrypt_credentials(credentials)
++    conn.scopes = scopes
++    conn.status = "connected"
++    conn.connected_at = utcnow()
++    db.add(AuditLog(store_id=store_id, actor_type="admin", action="connection.connected",
++                    entity_type="platform_connection", entity_id=platform, details={"account_id": account_id, "scopes": scopes}))
++    await db.commit()
++    return conn
++
++
++async def disconnect(db: AsyncSession, store_id: uuid.UUID, platform: str) -> bool:
++    conn = await get_connection(db, store_id, platform)
++    if conn is None:
++        return False
++    conn.credentials_encrypted = None
++    conn.status = "disconnected"
++    db.add(AuditLog(store_id=store_id, actor_type="admin", action="connection.disconnected",
++                    entity_type="platform_connection", entity_id=platform))
++    await db.commit()
++    return True
++
++
++def read_credentials(conn: PlatformConnection | None) -> dict | None:
++    if conn is None or conn.status != "connected" or not conn.credentials_encrypted:
++        return None
++    return decrypt_credentials(conn.credentials_encrypted)
++
++
++async def mark_connection_error(db: AsyncSession, conn: PlatformConnection, status: str = "error") -> None:
++    conn.status = status
++    await db.commit()
++
++
++def public_view(platform: str, conn: PlatformConnection | None) -> dict:
++    return {
++        "platform": platform,
++        "status": conn.status if conn else "disconnected",
++        "account_id": conn.external_account_id if conn else None,
++        "scopes": conn.scopes if conn else None,
++        "connected_at": conn.connected_at if conn else None,
++    }
++
++
++ALL_PLATFORMS = [Platform.TIENDANUBE.value, Platform.MERCADOLIBRE.value]
+diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
+new file mode 100644
+index 0000000..ab8aa58
+--- /dev/null
++++ b/backend/tests/conftest.py
+@@ -0,0 +1,73 @@
++import httpx
++import pytest
++import pytest_asyncio
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++from sqlalchemy.pool import StaticPool
++
++from app.api.connections import get_transport
++from app.config import settings
++from app.database import get_db
++from app.main import app
++from app.models import Base
++
++ADMIN = {"X-Admin-Key": "test-admin-key"}
++
++
++class FakeTiendanube:
++    """Simula token endpoint y /products con paginación por cabecera Link."""
++
++    def __init__(self):
++        self.products_pages: list[list[dict]] = [[]]
++        self.token_status = 200
++        self.requests: list[httpx.Request] = []
++
++    def handler(self, request: httpx.Request) -> httpx.Response:
++        self.requests.append(request)
++        if request.url.path == "/apps/authorize/token":
++            if self.token_status != 200:
++                return httpx.Response(self.token_status, json={"error": "invalid_grant"})
++            return httpx.Response(200, json={"access_token": "tok_secret_123", "token_type": "bearer",
++                                             "scope": "read_products", "user_id": 777})
++        if request.url.path.endswith("/products"):
++            page = int(request.url.params.get("page", "1"))
++            body = self.products_pages[page - 1]
++            headers = {}
++            if page < len(self.products_pages):
++                headers["Link"] = f'<https://api.tiendanube.com/v1/777/products?page={page + 1}&per_page=200>; rel="next"'
++            return httpx.Response(200, json=body, headers=headers)
++        return httpx.Response(404, json={})
++
++
++@pytest.fixture
++def fake_tn():
++    return FakeTiendanube()
++
++
++@pytest_asyncio.fixture
++async def client(monkeypatch, fake_tn):
++    monkeypatch.setattr(settings, "admin_api_key", "test-admin-key")
++    monkeypatch.setattr(settings, "tiendanube_app_id", "app123")
++    monkeypatch.setattr(settings, "tiendanube_client_secret", "shh")
++    monkeypatch.setattr(settings, "token_encryption_key", "a-test-encryption-secret-of-32-chars!!")
++    monkeypatch.setattr(settings, "frontend_url", "http://panel.test")
++
++    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
++    async with engine.begin() as conn:
++        await conn.run_sync(Base.metadata.create_all)
++    maker = async_sessionmaker(engine, expire_on_commit=False)
++
++    async def override_db():
++        async with maker() as session:
++            yield session
++
++    app.dependency_overrides[get_db] = override_db
++    app.dependency_overrides[get_transport] = lambda: httpx.MockTransport(fake_tn.handler)
++    app.state.session_maker = maker
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
++        yield c
++    app.dependency_overrides.clear()
++    await engine.dispose()
++
++
++def make_product(pid: int, name: str, variants: list[dict], published: bool = True) -> dict:
++    return {"id": pid, "name": {"es": name}, "published": published, "variants": variants}
+diff --git a/backend/tests/test_health.py b/backend/tests/test_health.py
+index 3375515..0620df2 100644
+--- a/backend/tests/test_health.py
++++ b/backend/tests/test_health.py
+@@ -6,4 +6,4 @@ def test_health_endpoint():
+     response = TestClient(app).get("/health")
+     assert response.status_code == 200
+     assert response.json()["status"] == "ok"
+-    assert response.json()["stage"] == 1
++    assert response.json()["stage"] == 2
+diff --git a/backend/tests/test_tiendanube_stage2.py b/backend/tests/test_tiendanube_stage2.py
+new file mode 100644
+index 0000000..60e594d
+--- /dev/null
++++ b/backend/tests/test_tiendanube_stage2.py
+@@ -0,0 +1,266 @@
++import httpx
++import pytest
++from sqlalchemy import select
++
++from app.integrations.tiendanube import TiendanubeClient, TiendanubeError
++from app.integrations.tiendanube.normalize import normalize_product
++from app.models import AuditLog, ExternalVariant, PlatformConnection
++from app.security import decrypt_credentials, encrypt_credentials
++from app.main import app
++from tests.conftest import ADMIN, make_product
++
++
++# ---------- cifrado ----------
++
++def test_credentials_roundtrip_and_not_plaintext(monkeypatch):
++    from app.config import settings
++    monkeypatch.setattr(settings, "token_encryption_key", "a-test-encryption-secret-of-32-chars!!")
++    blob = encrypt_credentials({"access_token": "abc"})
++    assert "abc" not in blob
++    assert decrypt_credentials(blob) == {"access_token": "abc"}
++
++
++def test_production_rejects_placeholder_key(monkeypatch):
++    from app.config import settings
++    monkeypatch.setattr(settings, "app_env", "production")
++    monkeypatch.setattr(settings, "token_encryption_key", "development-only-change-me")
++    with pytest.raises(RuntimeError):
++        encrypt_credentials({"a": 1})
++
++
++# ---------- normalización ----------
++
++def test_normalize_handles_names_sku_and_stock():
++    rows = normalize_product({
++        "id": 1, "name": {"es": "Remera", "pt": "Camiseta"}, "published": False,
++        "variants": [
++            {"id": 10, "sku": " R-ROJA-M ", "stock": 5, "values": [{"es": "Rojo"}, {"es": "M"}]},
++            {"id": 11, "sku": "", "stock": None, "values": []},
++            {"id": 12, "sku": "X", "stock": 99, "inventory_levels": [
++                {"location_id": "a", "stock": 2}, {"location_id": "b", "stock": 3}]},
++        ],
++    })
++    assert [r.external_variant_id for r in rows] == ["10", "11", "12"]
++    assert rows[0].sku == "R-ROJA-M" and rows[0].variant_name == "Rojo / M" and rows[0].stock == 5
++    assert rows[0].published is False
++    assert rows[1].sku is None and rows[1].stock is None and rows[1].variant_name is None
++    assert rows[2].stock == 5 and len(rows[2].inventory_levels) == 2
++
++
++# ---------- cliente ----------
++
++async def test_client_follows_link_pagination_and_sends_headers():
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        if request.url.params.get("page") == "2":
++            return httpx.Response(200, json=[{"id": 2}])
++        return httpx.Response(200, json=[{"id": 1}], headers={
++            "Link": '<https://api.tiendanube.com/v1/9/products?page=2&per_page=200>; rel="next"'})
++
++    async with TiendanubeClient("9", "tok", transport=httpx.MockTransport(handler)) as c:
++        ids = [p["id"] async for p in c.iter_products()]
++    assert ids == [1, 2]
++    assert seen[0].headers["User-Agent"]
++    assert seen[0].headers["Authentication"] == "bearer tok"
++    assert seen[0].url.params["per_page"] == "200"
++
++
++async def test_client_retries_429_using_rate_limit_reset():
++    calls, sleeps = [], []
++
++    def handler(request):
++        calls.append(1)
++        if len(calls) == 1:
++            return httpx.Response(429, headers={"X-Rate-Limit-Reset": "1500"})
++        return httpx.Response(200, json=[])
++
++    async def fake_sleep(s):
++        sleeps.append(s)
++
++    async with TiendanubeClient("9", "tok", transport=httpx.MockTransport(handler), sleep=fake_sleep) as c:
++        assert [p async for p in c.iter_products()] == []
++    assert len(calls) == 2 and 1.5 <= sleeps[0] < 2.0
++
++
++async def test_client_gives_up_after_max_retries():
++    async def fake_sleep(s):
++        pass
++
++    transport = httpx.MockTransport(lambda r: httpx.Response(503))
++    async with TiendanubeClient("9", "tok", transport=transport, sleep=fake_sleep) as c:
++        with pytest.raises(TiendanubeError) as err:
++            [p async for p in c.iter_products()]
++    assert err.value.retryable
++
++
++async def test_client_empty_store_404_is_empty_and_401_is_error():
++    async with TiendanubeClient("9", "t", transport=httpx.MockTransport(lambda r: httpx.Response(404))) as c:
++        assert [p async for p in c.iter_products()] == []
++    async with TiendanubeClient("9", "t", transport=httpx.MockTransport(lambda r: httpx.Response(401))) as c:
++        with pytest.raises(TiendanubeError) as err:
++            [p async for p in c.iter_products()]
++    assert err.value.status_code == 401
++
++
++# ---------- API: autenticación del panel ----------
++
++async def test_api_requires_admin_key(client):
++    assert (await client.get("/api/connections")).status_code == 401
++    assert (await client.get("/api/connections", headers={"X-Admin-Key": "nope"})).status_code == 401
++    assert (await client.get("/api/connections", headers=ADMIN)).status_code == 200
++
++
++async def test_api_disabled_without_configured_key(client, monkeypatch):
++    from app.config import settings
++    monkeypatch.setattr(settings, "admin_api_key", "")
++    assert (await client.get("/api/connections", headers=ADMIN)).status_code == 503
++
++
++# ---------- API: OAuth ----------
++
++async def _authorize(client) -> str:
++    resp = await client.post("/api/connections/tiendanube/authorize", headers=ADMIN)
++    assert resp.status_code == 200
++    url = resp.json()["authorize_url"]
++    assert url.startswith("https://www.tiendanube.com/apps/app123/authorize?state=")
++    return url.split("state=")[1]
++
++
++async def _connect(client) -> None:
++    state = await _authorize(client)
++    resp = await client.get("/api/connections/tiendanube/callback", params={"code": "abc", "state": state})
++    assert resp.status_code == 303 and resp.headers["location"].endswith("tiendanube=connected")
++
++
++async def test_oauth_flow_stores_encrypted_token(client, fake_tn):
++    await _connect(client)
++    status = (await client.get("/api/connections", headers=ADMIN)).json()
++    tn = next(c for c in status["connections"] if c["platform"] == "tiendanube")
++    assert tn["status"] == "connected" and tn["account_id"] == "777" and tn["scopes"] == "read_products"
++    assert "tok_secret_123" not in (await client.get("/api/connections", headers=ADMIN)).text  # nunca se expone
++
++    async with app.state.session_maker() as db:
++        conn = (await db.execute(select(PlatformConnection))).scalar_one()
++        assert "tok_secret_123" not in conn.credentials_encrypted
++        assert decrypt_credentials(conn.credentials_encrypted)["access_token"] == "tok_secret_123"
++        assert (await db.execute(select(AuditLog).where(AuditLog.action == "connection.connected"))).scalar_one()
++    token_req = next(r for r in fake_tn.requests if r.url.path == "/apps/authorize/token")
++    assert b'"grant_type":"authorization_code"' in token_req.content.replace(b" ", b"")
++
++
++async def test_callback_rejects_unknown_and_reused_state(client):
++    r = await client.get("/api/connections/tiendanube/callback", params={"code": "abc", "state": "forged"})
++    assert r.headers["location"].endswith("tiendanube=error_invalid_state")
++    state = await _authorize(client)
++    ok = await client.get("/api/connections/tiendanube/callback", params={"code": "abc", "state": state})
++    assert ok.headers["location"].endswith("tiendanube=connected")
++    again = await client.get("/api/connections/tiendanube/callback", params={"code": "abc", "state": state})
++    assert again.headers["location"].endswith("tiendanube=error_invalid_state")  # un solo uso
++
++
++async def test_callback_missing_params_and_token_failure(client, fake_tn):
++    r = await client.get("/api/connections/tiendanube/callback")
++    assert r.headers["location"].endswith("tiendanube=error_missing_params")
++    fake_tn.token_status = 400
++    state = await _authorize(client)
++    r = await client.get("/api/connections/tiendanube/callback", params={"code": "expired", "state": state})
++    assert r.headers["location"].endswith("tiendanube=error_token_exchange")
++    tn = next(c for c in (await client.get("/api/connections", headers=ADMIN)).json()["connections"]
++              if c["platform"] == "tiendanube")
++    assert tn["status"] == "disconnected"
++
++
++async def test_authorize_without_app_id_is_503(client, monkeypatch):
++    from app.config import settings
++    monkeypatch.setattr(settings, "tiendanube_app_id", "")
++    assert (await client.post("/api/connections/tiendanube/authorize", headers=ADMIN)).status_code == 503
++
++
++async def test_disconnect_clears_credentials(client):
++    await _connect(client)
++    assert (await client.delete("/api/connections/tiendanube", headers=ADMIN)).status_code == 200
++    async with app.state.session_maker() as db:
++        conn = (await db.execute(select(PlatformConnection))).scalar_one()
++        assert conn.credentials_encrypted is None and conn.status == "disconnected"
++
++
++# ---------- API: importación de catálogo ----------
++
++async def test_import_requires_connection(client):
++    job = (await client.post("/api/catalog/tiendanube/import", headers=ADMIN)).json()
++    assert job["status"] == "failed" and "no está conectada" in job["error_message"]
++
++
++async def test_import_upserts_paginates_and_deactivates_missing(client, fake_tn):
++    await _connect(client)
++    fake_tn.products_pages = [
++        [make_product(1, "Remera", [{"id": 10, "sku": "R-1", "stock": 4, "values": [{"es": "Rojo"}]},
++                                    {"id": 11, "sku": None, "stock": None, "values": [{"es": "Azul"}]}])],
++        [make_product(2, "Gorra", [{"id": 20, "sku": "G-1", "stock": 0, "values": []}])],
++    ]
++    job = (await client.post("/api/catalog/tiendanube/import", headers=ADMIN)).json()
++    assert job["status"] == "completed"
++    assert job["logs"][0]["details"] == {"created": 3, "updated": 0, "deactivated": 0, "total": 3}
++
++    data = (await client.get("/api/catalog/variants", headers=ADMIN)).json()
++    assert data["total"] == 3
++    gorra = next(i for i in data["items"] if i["sku"] == "G-1")
++    assert gorra["stock"] == 0  # 0 no es lo mismo que "sin control de stock"
++
++    stats = (await client.get("/api/catalog/tiendanube/stats", headers=ADMIN)).json()
++    assert stats["variants"] == 3 and stats["without_sku"] == 1 and stats["unmanaged_stock"] == 1
++
++    # segunda importación: cambia stock, desaparece la variante 20
++    fake_tn.products_pages = [[make_product(1, "Remera", [
++        {"id": 10, "sku": "R-1", "stock": 9, "values": [{"es": "Rojo"}]},
++        {"id": 11, "sku": "R-2", "stock": 1, "values": [{"es": "Azul"}]}])]]
++    job2 = (await client.post("/api/catalog/tiendanube/import", headers=ADMIN)).json()
++    assert job2["logs"][0]["details"] == {"created": 0, "updated": 2, "deactivated": 1, "total": 2}
++    items = (await client.get("/api/catalog/variants", headers=ADMIN)).json()["items"]
++    assert {i["sku"]: i["stock"] for i in items} == {"R-1": 9, "R-2": 1}
++
++    jobs = (await client.get("/api/sync/jobs", headers=ADMIN)).json()["items"]
++    assert [j["status"] for j in jobs] == ["completed", "completed"]
++
++
++async def test_import_is_read_only_against_tiendanube(client, fake_tn):
++    await _connect(client)
++    fake_tn.products_pages = [[make_product(1, "A", [{"id": 1, "sku": "A", "stock": 1}])]]
++    await client.post("/api/catalog/tiendanube/import", headers=ADMIN)
++    api_calls = [r for r in fake_tn.requests if r.url.path.endswith("/products")]
++    assert api_calls and all(r.method == "GET" for r in api_calls)
++
++
++async def test_failed_import_keeps_previous_catalog_and_flags_connection(client, fake_tn):
++    await _connect(client)
++    fake_tn.products_pages = [[make_product(1, "A", [{"id": 1, "sku": "A", "stock": 1}])]]
++    await client.post("/api/catalog/tiendanube/import", headers=ADMIN)
++
++    original = fake_tn.handler
++    fake_tn.handler = lambda req: httpx.Response(401) if req.url.path.endswith("/products") else original(req)
++    from app.api.connections import get_transport
++    app.dependency_overrides[get_transport] = lambda: httpx.MockTransport(fake_tn.handler)
++
++    job = (await client.post("/api/catalog/tiendanube/import", headers=ADMIN)).json()
++    assert job["status"] == "failed" and "token" in job["error_message"]
++    assert (await client.get("/api/catalog/variants", headers=ADMIN)).json()["total"] == 1  # no se borró nada
++    tn = next(c for c in (await client.get("/api/connections", headers=ADMIN)).json()["connections"]
++              if c["platform"] == "tiendanube")
++    assert tn["status"] == "error"
++
++
++async def test_variant_search_and_filters(client, fake_tn):
++    await _connect(client)
++    fake_tn.products_pages = [[
++        make_product(1, "Remera Lisa", [{"id": 1, "sku": "REM-1", "stock": 1}, {"id": 2, "sku": None, "stock": 1}]),
++        make_product(2, "Gorra", [{"id": 3, "sku": "GOR-1", "stock": 1}]),
++    ]]
++    await client.post("/api/catalog/tiendanube/import", headers=ADMIN)
++    by_sku = (await client.get("/api/catalog/variants", params={"q": "gor"}, headers=ADMIN)).json()
++    assert by_sku["total"] == 1 and by_sku["items"][0]["sku"] == "GOR-1"
++    nosku = (await client.get("/api/catalog/variants", params={"only_without_sku": "true"}, headers=ADMIN)).json()
++    assert nosku["total"] == 1 and nosku["items"][0]["product_name"] == "Remera Lisa"
++    page = (await client.get("/api/catalog/variants", params={"limit": 1, "offset": 1}, headers=ADMIN)).json()
++    assert page["total"] == 3 and len(page["items"]) == 1
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+index 792069c..c3c2c97 100644
+--- a/docs/roadmap.md
++++ b/docs/roadmap.md
+@@ -9,11 +9,13 @@
+ - [ ] Revisar y ejecutar migración contra PostgreSQL en el entorno del usuario.
+ 
+ ## Etapa 2 — Tiendanube
+-- [ ] Revisar documentación oficial vigente: OAuth, scopes, variantes, stock, ubicaciones, webhooks y límites.
+-- [ ] Registrar aplicación y callback.
+-- [ ] Implementar OAuth state/CSRF y almacenamiento cifrado.
+-- [ ] Cliente HTTP con timeout, retry y rate limiting.
+-- [ ] Pruebas con respuestas mock y tienda de prueba.
++- [x] Revisar documentación oficial vigente: OAuth, scopes, variantes, stock, ubicaciones, límites. (Webhooks: etapa 6.)
++- [ ] Registrar aplicación y callback (lo haces tú en el panel de socios de Tiendanube).
++- [x] Implementar OAuth state/CSRF (state de un solo uso, caduca en 10 min) y almacenamiento cifrado.
++- [x] Cliente HTTP con timeout, retry (429/5xx, respeta X-Rate-Limit-Reset) y paginación por Link.
++- [x] Importación de catálogo de solo lectura, con historial de trabajos y errores.
++- [x] Pruebas con respuestas mock (escritas; ejecútalas con `pytest -q`).
++- [ ] Probar con una tienda real y confirmar la cabecera del token.
+ 
+ ## Etapa 3 — Mercado Libre
+ - [ ] Revisar documentación oficial vigente: OAuth, permisos, publicaciones, variaciones, inventario y notificaciones.
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 463243b..f27f24b 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -1,22 +1,250 @@
++import { useCallback, useEffect, useState } from "react";
++
++const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
++const KEY_STORAGE = "inventory-sync-admin-key";
++
++const RESULT_MESSAGES = {
++  connected: ["ok", "Tiendanube conectada correctamente."],
++  error_invalid_state: ["error", "La autorización caducó o no es válida. Vuelve a pulsar Conectar."],
++  error_token_exchange: ["error", "Tiendanube rechazó el código de autorización. Inténtalo de nuevo."],
++  error_missing_params: ["error", "Tiendanube no devolvió los datos esperados."],
++};
++
++function loadKey() {
++  try { return sessionStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
++}
++
++async function api(path, adminKey, options = {}) {
++  const response = await fetch(`${API}${path}`, {
++    ...options,
++    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json", ...(options.headers || {}) },
++  });
++  if (!response.ok) {
++    let detail = `Error ${response.status}`;
++    try { detail = (await response.json()).detail || detail; } catch { /* sin cuerpo */ }
++    const error = new Error(detail);
++    error.status = response.status;
++    throw error;
++  }
++  return response.json();
++}
++
++const fmt = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
++
+ export default function App() {
++  const [adminKey, setAdminKey] = useState(loadKey);
++  const [keyDraft, setKeyDraft] = useState("");
++  const [connections, setConnections] = useState(null);
++  const [stats, setStats] = useState(null);
++  const [variants, setVariants] = useState({ total: 0, items: [] });
++  const [jobs, setJobs] = useState([]);
++  const [query, setQuery] = useState("");
++  const [onlyNoSku, setOnlyNoSku] = useState(false);
++  const [offset, setOffset] = useState(0);
++  const [busy, setBusy] = useState(false);
++  const [notice, setNotice] = useState(null);
++  const limit = 50;
++
++  const tiendanube = connections?.connections.find((c) => c.platform === "tiendanube");
++  const mercadolibre = connections?.connections.find((c) => c.platform === "mercadolibre");
++  const connected = tiendanube?.status === "connected";
++
++  // Resultado de la redirección OAuth (?tiendanube=connected|error_...).
++  useEffect(() => {
++    const result = new URLSearchParams(window.location.search).get("tiendanube");
++    if (result && RESULT_MESSAGES[result]) {
++      const [kind, text] = RESULT_MESSAGES[result];
++      setNotice({ kind, text });
++      window.history.replaceState({}, "", window.location.pathname);
++    }
++  }, []);
++
++  const handleError = useCallback((error) => {
++    if (error.status === 401) {
++      try { sessionStorage.removeItem(KEY_STORAGE); } catch { /* ignorar */ }
++      setAdminKey("");
++      setNotice({ kind: "error", text: "Clave de administración incorrecta." });
++    } else {
++      setNotice({ kind: "error", text: error.message });
++    }
++  }, []);
++
++  const refresh = useCallback(async () => {
++    if (!adminKey) return;
++    try {
++      const [conn, st, jb] = await Promise.all([
++        api("/api/connections", adminKey),
++        api("/api/catalog/tiendanube/stats", adminKey),
++        api("/api/sync/jobs?limit=10", adminKey),
++      ]);
++      setConnections(conn); setStats(st); setJobs(jb.items);
++    } catch (error) { handleError(error); }
++  }, [adminKey, handleError]);
++
++  const loadVariants = useCallback(async () => {
++    if (!adminKey) return;
++    const params = new URLSearchParams({ platform: "tiendanube", limit, offset });
++    if (query.trim()) params.set("q", query.trim());
++    if (onlyNoSku) params.set("only_without_sku", "true");
++    try { setVariants(await api(`/api/catalog/variants?${params}`, adminKey)); } catch (error) { handleError(error); }
++  }, [adminKey, query, onlyNoSku, offset, handleError]);
++
++  useEffect(() => { refresh(); }, [refresh]);
++  useEffect(() => { const t = setTimeout(loadVariants, 250); return () => clearTimeout(t); }, [loadVariants]);
++
++  const saveKey = (event) => {
++    event.preventDefault();
++    try { sessionStorage.setItem(KEY_STORAGE, keyDraft.trim()); } catch { /* ignorar */ }
++    setAdminKey(keyDraft.trim()); setKeyDraft(""); setNotice(null);
++  };
++
++  const connect = async () => {
++    setBusy(true);
++    try {
++      const { authorize_url } = await api("/api/connections/tiendanube/authorize", adminKey, { method: "POST" });
++      window.location.href = authorize_url;
++    } catch (error) { handleError(error); setBusy(false); }
++  };
++
++  const disconnect = async () => {
++    if (!window.confirm("¿Desconectar Tiendanube? Se borra el token guardado; el catálogo importado se conserva.")) return;
++    try { await api("/api/connections/tiendanube", adminKey, { method: "DELETE" }); await refresh(); } catch (error) { handleError(error); }
++  };
++
++  const importCatalog = async () => {
++    setBusy(true); setNotice(null);
++    try {
++      const job = await api("/api/catalog/tiendanube/import", adminKey, { method: "POST" });
++      if (job.status === "completed") {
++        const d = job.logs[0]?.details || {};
++        setNotice({ kind: "ok", text: `Importación lista: ${d.total} variantes (${d.created} nuevas, ${d.updated} actualizadas, ${d.deactivated} ya no existen).` });
++      } else {
++        setNotice({ kind: "error", text: `La importación falló: ${job.error_message}` });
++      }
++      setOffset(0);
++      await Promise.all([refresh(), loadVariants()]);
++    } catch (error) { handleError(error); } finally { setBusy(false); }
++  };
++
++  if (!adminKey) {
++    return (
++      <main className="shell narrow">
++        <header><div className="mark">IS</div><div><strong>Inventory Sync</strong><small>Tiendanube ↔ Mercado Libre</small></div></header>
++        <section className="hero compact">
++          <p className="eyebrow">ACCESO</p>
++          <h1>Clave de administración</h1>
++          <p>Introduce el valor de <code>ADMIN_API_KEY</code> configurado en el servidor. Se guarda solo en esta pestaña.</p>
++        </section>
++        {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
++        <form className="keyform" onSubmit={saveKey}>
++          <input type="password" autoFocus value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} placeholder="ADMIN_API_KEY" />
++          <button className="primary" disabled={!keyDraft.trim()}>Entrar</button>
++        </form>
++      </main>
++    );
++  }
++
+   return (
+     <main className="shell">
+       <header>
+         <div className="mark">IS</div>
+         <div><strong>Inventory Sync</strong><small>Tiendanube ↔ Mercado Libre</small></div>
+-        <span className="stage">ETAPA 1 · BASE</span>
++        <span className="stage">ETAPA 2 · TIENDANUBE</span>
+       </header>
+-      <section className="hero">
+-        <p className="eyebrow">PANEL DE CONTROL</p>
+-        <h1>Tu inventario, bajo control.</h1>
+-        <p>La infraestructura está preparada. Conecta ambas plataformas en las siguientes etapas para importar tus productos y variantes.</p>
+-      </section>
++
++      {notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
++
+       <section className="grid">
+-        <article><span>01</span><h2>Tiendanube</h2><p>Conexión pendiente</p><small>OAuth se implementará en etapa 2.</small></article>
+-        <article><span>02</span><h2>Mercado Libre</h2><p>Conexión pendiente</p><small>OAuth se implementará en etapa 3.</small></article>
+-        <article><span>03</span><h2>Catálogo</h2><p>Sin importar</p><small>La importación inicial será de solo lectura.</small></article>
++        <article>
++          <span>01</span><h2>Tiendanube</h2>
++          <p className={`status ${tiendanube?.status || "disconnected"}`}>
++            {connected ? "Conectada" : tiendanube?.status === "error" ? "Requiere reconexión" : "Sin conectar"}
++          </p>
++          {connected && <small>Tienda {tiendanube.account_id} · permisos: {tiendanube.scopes || "—"}<br />Desde {fmt(tiendanube.connected_at)}</small>}
++          <div className="actions">
++            <button className="primary" onClick={connect} disabled={busy}>{connected ? "Reautorizar" : "Conectar"}</button>
++            {connected && <button onClick={disconnect}>Desconectar</button>}
++          </div>
++        </article>
++        <article>
++          <span>02</span><h2>Mercado Libre</h2>
++          <p className="status disconnected">{mercadolibre?.status === "connected" ? "Conectada" : "Pendiente"}</p>
++          <small>La conexión con Mercado Libre llega en la etapa 3.</small>
++        </article>
++        <article>
++          <span>03</span><h2>Catálogo Tiendanube</h2>
++          <p>{stats ? `${stats.variants} variantes` : "…"}</p>
++          {stats && stats.variants > 0 && (
++            <small>{stats.without_sku} sin SKU · {stats.unmanaged_stock} sin control de stock<br />Última lectura: {fmt(stats.last_synced_at)}</small>
++          )}
++          <div className="actions">
++            <button className="primary" onClick={importCatalog} disabled={busy || !connected}>
++              {busy ? "Importando…" : "Importar catálogo"}
++            </button>
++          </div>
++          <small className="hint">Solo lectura: no modifica nada en Tiendanube.</small>
++        </article>
++      </section>
++
++      <section className="panel">
++        <div className="panel-head">
++          <h2>Variantes importadas</h2>
++          <div className="filters">
++            <input type="search" placeholder="Buscar por SKU o nombre" value={query}
++                   onChange={(e) => { setQuery(e.target.value); setOffset(0); }} />
++            <label><input type="checkbox" checked={onlyNoSku} onChange={(e) => { setOnlyNoSku(e.target.checked); setOffset(0); }} /> Solo sin SKU</label>
++          </div>
++        </div>
++        {variants.items.length === 0 ? (
++          <p className="empty">{connected ? "No hay variantes. Pulsa «Importar catálogo»." : "Conecta Tiendanube para importar tu catálogo."}</p>
++        ) : (
++          <>
++            <table>
++              <thead><tr><th>Producto</th><th>Variante</th><th>SKU</th><th className="num">Stock</th><th>Estado</th></tr></thead>
++              <tbody>
++                {variants.items.map((v) => (
++                  <tr key={v.id}>
++                    <td>{v.product_name}</td>
++                    <td>{v.variant_name || "—"}</td>
++                    <td>{v.sku ? <code>{v.sku}</code> : <em className="warn">sin SKU</em>}</td>
++                    <td className="num">{v.stock === null ? <em>sin control</em> : v.stock}</td>
++                    <td>{v.published ? "Publicado" : "Oculto"}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++            <div className="pager">
++              <span>{offset + 1}–{Math.min(offset + limit, variants.total)} de {variants.total}</span>
++              <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Anterior</button>
++              <button disabled={offset + limit >= variants.total} onClick={() => setOffset(offset + limit)}>Siguiente</button>
++            </div>
++          </>
++        )}
++      </section>
++
++      <section className="panel">
++        <div className="panel-head"><h2>Historial de importaciones</h2></div>
++        {jobs.length === 0 ? <p className="empty">Todavía no hay importaciones.</p> : (
++          <table>
++            <thead><tr><th>Fecha</th><th>Tipo</th><th>Estado</th><th>Detalle</th></tr></thead>
++            <tbody>
++              {jobs.map((j) => (
++                <tr key={j.id}>
++                  <td>{fmt(j.created_at)}</td>
++                  <td>{j.job_type === "catalog_import" ? "Importar catálogo" : j.job_type}</td>
++                  <td><span className={`pill ${j.status}`}>{j.status === "completed" ? "Completada" : j.status === "failed" ? "Falló" : j.status}</span></td>
++                  <td>{j.error_message || "—"}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        )}
+       </section>
+-      <footer>Etapa 1 · Arquitectura y persistencia · No se modifica inventario externo.</footer>
++
++      <footer>
++        Etapa 2 · Tiendanube en solo lectura · La comparación de stock y la sincronización llegan en las etapas 4 y 5.
++        <button className="link" onClick={() => { try { sessionStorage.removeItem(KEY_STORAGE); } catch { /* ignorar */ } setAdminKey(""); }}>Cerrar sesión</button>
++      </footer>
+     </main>
+   );
+ }
+diff --git a/frontend/src/style.css b/frontend/src/style.css
+index 24dd639..240d1dc 100644
+--- a/frontend/src/style.css
++++ b/frontend/src/style.css
+@@ -2,18 +2,55 @@
+ * { box-sizing: border-box; }
+ body { margin: 0; }
+ .shell { max-width: 1080px; margin: 0 auto; padding: 34px 24px; }
+-header { display:flex; align-items:center; gap:12px; }
++.shell.narrow { max-width: 560px; }
++header { display:flex; align-items:center; gap:12px; margin-bottom:28px; }
+ .mark { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; color:white; background:#16764f; font-weight:800; }
+ header small { display:block; color:#718078; margin-top:3px; }
+ .stage { margin-left:auto; font-size:11px; letter-spacing:.08em; color:#16764f; background:#e2f3e9; padding:8px 11px; border-radius:20px; }
+-.hero { padding:78px 0 48px; max-width:690px; }
++.hero { padding:48px 0 24px; max-width:690px; }
++.hero.compact { padding:32px 0 12px; }
+ .eyebrow { color:#16764f; font-size:11px; font-weight:800; letter-spacing:.15em; }
+-h1 { font-size:clamp(38px,6vw,64px); line-height:1.03; letter-spacing:-.05em; margin:14px 0; }
+-.hero p:last-child { color:#64736b; line-height:1.7; font-size:17px; }
+-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+-article { background:white; border:1px solid #e5ebe7; border-radius:16px; padding:24px; min-height:190px; }
++h1 { font-size:clamp(30px,5vw,48px); line-height:1.05; letter-spacing:-.04em; margin:14px 0; }
++.hero p:last-child { color:#64736b; line-height:1.7; font-size:16px; }
++.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
++article { background:white; border:1px solid #e5ebe7; border-radius:16px; padding:24px; min-height:190px; display:flex; flex-direction:column; }
+ article span { color:#16764f; font-size:12px; font-weight:800; }
+-article h2 { margin:22px 0 8px; font-size:20px; }
++article h2 { margin:18px 0 8px; font-size:20px; }
+ article p { margin:0 0 7px; font-weight:650; }
+-article small { color:#78857e; }
+-footer { margin-top:55px; padding-top:20px; border-top:1px solid #dfe7e2; color:#7b8981; font-size:12px; }
++article small { color:#78857e; line-height:1.5; }
++article .hint { margin-top:10px; }
++.actions { display:flex; gap:8px; margin-top:auto; padding-top:16px; }
++button { font:inherit; font-size:14px; padding:9px 14px; border-radius:10px; border:1px solid #cfd9d3; background:white; color:#17231f; cursor:pointer; }
++button:hover:not(:disabled) { background:#f0f5f2; }
++button:disabled { opacity:.5; cursor:not-allowed; }
++button.primary { background:#16764f; border-color:#16764f; color:white; }
++button.primary:hover:not(:disabled) { background:#126040; }
++button.link { border:0; background:none; color:#16764f; padding:0 0 0 12px; text-decoration:underline; }
++.status.connected { color:#16764f; }
++.status.error { color:#b4531a; }
++.status.disconnected { color:#78857e; }
++.notice { margin:20px 0 0; padding:12px 16px; border-radius:12px; font-size:14px; }
++.notice.ok { background:#e2f3e9; color:#0f5a3b; }
++.notice.error { background:#fbe9e4; color:#8a2e12; }
++.keyform { display:flex; gap:8px; margin-top:20px; }
++.keyform input { flex:1; }
++input[type="password"], input[type="search"] { font:inherit; font-size:14px; padding:10px 12px; border:1px solid #cfd9d3; border-radius:10px; background:white; }
++.panel { background:white; border:1px solid #e5ebe7; border-radius:16px; padding:22px 24px; margin-top:20px; overflow-x:auto; }
++.panel-head { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
++.panel-head h2 { margin:0; font-size:18px; }
++.filters { display:flex; align-items:center; gap:14px; margin-left:auto; font-size:14px; color:#4d5d55; }
++.filters input[type="search"] { width:240px; }
++table { width:100%; border-collapse:collapse; font-size:14px; }
++th { text-align:left; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#78857e; padding:8px 10px; border-bottom:1px solid #e5ebe7; }
++td { padding:10px; border-bottom:1px solid #f0f4f1; vertical-align:top; }
++.num { text-align:right; font-variant-numeric:tabular-nums; }
++code { background:#eef3f0; padding:2px 6px; border-radius:6px; font-size:13px; }
++em { color:#78857e; font-style:normal; }
++em.warn { color:#b4531a; }
++.pill { font-size:12px; font-weight:650; padding:3px 9px; border-radius:20px; background:#eef3f0; }
++.pill.completed { background:#e2f3e9; color:#0f5a3b; }
++.pill.failed { background:#fbe9e4; color:#8a2e12; }
++.pager { display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:14px; font-size:13px; color:#64736b; }
++.pager span { margin-right:auto; }
++.empty { color:#78857e; margin:8px 0; }
++footer { margin-top:40px; padding-top:20px; border-top:1px solid #dfe7e2; color:#7b8981; font-size:12px; }
