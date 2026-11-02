@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API = "https://spindly-spooky-spider-wwxx7gj7w95h9pgj-8000.app.github.dev"
 const KEY_STORAGE = "inventory-sync-admin-key";
 
 const RESULT_MESSAGES = {

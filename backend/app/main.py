@@ -10,15 +10,20 @@ app = FastAPI(
     description="Middleware de inventario Tiendanube + Mercado Libre. Etapa 2: conexión y catálogo de Tiendanube (solo lectura).",
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=[
+        "http://localhost:5173",
+         "https://spindly-spooky-spider-wwxx7gj7w95h9pgj-5173.app.github.dev",
+        settings.frontend_url.rstrip("/"),
+    ],
+    allow_origin_regex=r"^https://[a-z0-9-]+-5173\.app\.github\.dev$",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Admin-Key"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+      allow_headers=["*"],
 )
-
-app.include_router(api_router)
 
 
 @app.get("/health", tags=["health"])
