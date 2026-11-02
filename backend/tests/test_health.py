@@ -6,4 +6,4 @@ def test_health_endpoint():
     response = TestClient(app).get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["stage"] == 1
+    assert response.json()["stage"] == 2

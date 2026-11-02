@@ -1,8 +1,20 @@
 # Inventory Sync — Tiendanube + Mercado Libre
 
-Middleware propio para reconciliar inventario entre una tienda Tiendanube y una cuenta de Mercado Libre. Esta entrega implementa **Etapa 1: arquitectura, modelo de datos, migración inicial, configuración local, documentación y pruebas base**.
+Middleware propio para reconciliar inventario entre una tienda Tiendanube y una cuenta de Mercado Libre. Esta entrega implementa la **Etapa 2: conexión OAuth con Tiendanube e importación de su catálogo (solo lectura)**, sobre la base de la Etapa 1.
 
-> No conecta todavía con las API externas ni modifica publicaciones. OAuth, webhooks e inventario real se implementarán en etapas posteriores, después de verificar los contratos oficiales vigentes.
+> Todavía **no sincroniza inventario**: no escribe nada en Tiendanube ni en Mercado Libre. Mercado Libre, la asociación por SKU, la comparación de stock y la sincronización llegan en las etapas 3 a 6.
+
+## Etapa 2: conectar Tiendanube
+
+1. En el panel de socios de Tiendanube crea una aplicación con el permiso `read_products` y como URL de redirección `<URL pública del backend>/api/connections/tiendanube/callback`.
+2. En `.env` completa `ADMIN_API_KEY`, `TIENDANUBE_APP_ID`, `TIENDANUBE_CLIENT_SECRET`, `TIENDANUBE_USER_AGENT` y `FRONTEND_URL` (ver `.env.example`).
+3. Aplica la migración nueva: `docker compose exec backend alembic upgrade head`.
+4. Abre el panel, introduce la `ADMIN_API_KEY`, pulsa **Conectar** y autoriza la app en Tiendanube.
+5. Pulsa **Importar catálogo**. El panel muestra variantes, SKU, stock, y el historial de importaciones con sus errores.
+
+El token de Tiendanube se guarda cifrado (Fernet, derivado de `TOKEN_ENCRYPTION_KEY`) y nunca se devuelve por la API.
+
+**Pendiente de comprobar con una tienda real:** el nombre exacto de la cabecera del token (`Authentication: bearer …`, constante `AUTH_HEADER` en `integrations/tiendanube/client.py`) no aparece en las páginas de documentación consultadas.
 
 ## Stack
 
@@ -111,7 +123,7 @@ inventory-sync/
 | Etapa | Estado |
 |---|---|
 | 1. Arquitectura, base de datos y documentación | Implementación inicial entregada |
-| 2. Tiendanube OAuth/API | Pendiente de verificación documental |
+| 2. Tiendanube OAuth/API | Implementada; falta probar con tienda real |
 | 3. Mercado Libre OAuth/API | Pendiente de verificación documental |
 | 4. Importación y asociación por SKU | Pendiente |
 | 5. Sincronización y movimientos | Pendiente |

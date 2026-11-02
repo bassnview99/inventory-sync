@@ -198,3 +198,37 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(160))
     details: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class OAuthState(Base):
+    """Valor `state` de un flujo OAuth en curso. De un solo uso y con caducidad (protección CSRF)."""
+    __tablename__ = "oauth_states"
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    store_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExternalVariant(Base):
+    """Instantánea de solo lectura de una variante tal como existe en una plataforma externa."""
+    __tablename__ = "external_variants"
+    __table_args__ = (
+        UniqueConstraint("store_id", "platform", "external_variant_id", name="uq_external_variant"),
+        Index("ix_external_variants_sku", "store_id", "platform", "sku"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    store_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(30), nullable=False)
+    external_product_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    external_variant_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    variant_name: Mapped[str | None] = mapped_column(String(240))
+    sku: Mapped[str | None] = mapped_column(String(160))
+    # None = la plataforma no controla stock para esta variante (stock ilimitado).
+    stock: Mapped[int | None] = mapped_column(Integer)
+    inventory_levels: Mapped[list | None] = mapped_column(JSON)
+    published: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # False cuando la variante dejó de aparecer en una importación completa.
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

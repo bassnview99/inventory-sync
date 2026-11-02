@@ -9,11 +9,13 @@
 - [ ] Revisar y ejecutar migración contra PostgreSQL en el entorno del usuario.
 
 ## Etapa 2 — Tiendanube
-- [ ] Revisar documentación oficial vigente: OAuth, scopes, variantes, stock, ubicaciones, webhooks y límites.
-- [ ] Registrar aplicación y callback.
-- [ ] Implementar OAuth state/CSRF y almacenamiento cifrado.
-- [ ] Cliente HTTP con timeout, retry y rate limiting.
-- [ ] Pruebas con respuestas mock y tienda de prueba.
+- [x] Revisar documentación oficial vigente: OAuth, scopes, variantes, stock, ubicaciones, límites. (Webhooks: etapa 6.)
+- [ ] Registrar aplicación y callback (lo haces tú en el panel de socios de Tiendanube).
+- [x] Implementar OAuth state/CSRF (state de un solo uso, caduca en 10 min) y almacenamiento cifrado.
+- [x] Cliente HTTP con timeout, retry (429/5xx, respeta X-Rate-Limit-Reset) y paginación por Link.
+- [x] Importación de catálogo de solo lectura, con historial de trabajos y errores.
+- [x] Pruebas con respuestas mock (escritas; ejecútalas con `pytest -q`).
+- [ ] Probar con una tienda real y confirmar la cabecera del token.
 
 ## Etapa 3 — Mercado Libre
 - [ ] Revisar documentación oficial vigente: OAuth, permisos, publicaciones, variaciones, inventario y notificaciones.
